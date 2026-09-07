@@ -93,14 +93,14 @@ func openDirectoryNoReparse(path string) (*os.File, error) {
 	return os.NewFile(handle, path), nil
 }
 
-func openLockNoReparse(path string) (*os.File, error) {
+func openLockNoReparse(path string, access, disposition uint32) (*os.File, error) {
 	name, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
 	}
 	handle, _, callErr := createFileProc.Call(
-		uintptr(unsafe.Pointer(name)), genericRead|genericWrite,
-		fileShareRead|fileShareWrite, 0, openAlways,
+		uintptr(unsafe.Pointer(name)), uintptr(access),
+		fileShareRead|fileShareWrite, 0, uintptr(disposition),
 		fileFlagReparse, 0,
 	)
 	if handle == uintptr(syscall.InvalidHandle) {

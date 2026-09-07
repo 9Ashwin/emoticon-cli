@@ -33,6 +33,14 @@ type fileLock struct {
 }
 
 func acquireLock(ctx context.Context, root string, exclusive bool, timeout time.Duration) (*fileLock, error) {
+	return acquireLockMode(ctx, root, exclusive, true, timeout)
+}
+
+func acquireReadLock(ctx context.Context, root string, timeout time.Duration) (*fileLock, error) {
+	return acquireLockMode(ctx, root, false, false, timeout)
+}
+
+func acquireLockMode(ctx context.Context, root string, exclusive, create bool, timeout time.Duration) (*fileLock, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, errorf("cancelled", "interrupted", "Retry the operation when ready.", "library lock acquisition cancelled")
 	}
@@ -41,19 +49,45 @@ func acquireLock(ctx context.Context, root string, exclusive bool, timeout time.
 		return nil, wrapError("validation", "unsafe_path", "Use a real library directory.", err)
 	}
 	sticker := filepath.Join(root, ".sticker")
-	if err := os.Mkdir(sticker, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+	if create {
+		if err := os.Mkdir(sticker, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			_ = rootAnchor.Close()
+			return nil, wrapError("io", "write_failed", "Choose a writable library directory.", err)
+		}
+	} else if _, err := os.Stat(sticker); errors.Is(err, os.ErrNotExist) {
 		_ = rootAnchor.Close()
-		return nil, wrapError("io", "write_failed", "Choose a writable library directory.", err)
+		return nil, nil
+	} else if err != nil {
+		_ = rootAnchor.Close()
+		return nil, wrapError("io", "read_failed", "Check the library lock.", err)
 	}
 	stickerAnchor, err := openDirectoryNoReparse(sticker)
 	if err != nil {
 		_ = rootAnchor.Close()
+		if !create && errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if !create {
+			return nil, wrapError("io", "read_failed", "Check the library lock.", err)
+		}
 		return nil, wrapError("validation", "unsafe_path", "Remove links from the library path.", err)
 	}
-	file, err := openLockNoReparse(filepath.Join(sticker, "write.lock"))
+	access := uint32(genericRead)
+	disposition := uint32(openExisting)
+	if create {
+		access |= genericWrite
+		disposition = openAlways
+	}
+	file, err := openLockNoReparse(filepath.Join(sticker, "write.lock"), access, disposition)
 	if err != nil {
 		_ = stickerAnchor.Close()
 		_ = rootAnchor.Close()
+		if !create && errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if !create {
+			return nil, wrapError("io", "read_failed", "Check the library lock.", err)
+		}
 		return nil, wrapError("io", "write_failed", "Choose a writable library directory.", err)
 	}
 	lock := &fileLock{file: file, anchors: []*os.File{stickerAnchor, rootAnchor}}
@@ -97,7 +131,7 @@ func acquireReadLockIfPresent(ctx context.Context, root string, timeout time.Dur
 	} else if err != nil {
 		return nil, wrapError("io", "read_failed", "Check the library lock.", err)
 	}
-	return acquireLock(ctx, root, false, timeout)
+	return acquireReadLock(ctx, root, timeout)
 }
 
 func (l *fileLock) Close() error {

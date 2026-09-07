@@ -21,6 +21,14 @@ type fileLock struct {
 }
 
 func acquireLock(ctx context.Context, root string, exclusive bool, timeout time.Duration) (*fileLock, error) {
+	return acquireLockMode(ctx, root, exclusive, true, timeout)
+}
+
+func acquireReadLock(ctx context.Context, root string, timeout time.Duration) (*fileLock, error) {
+	return acquireLockMode(ctx, root, false, false, timeout)
+}
+
+func acquireLockMode(ctx context.Context, root string, exclusive, create bool, timeout time.Duration) (*fileLock, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, errorf("cancelled", "interrupted", "Retry the operation when ready.", "library lock acquisition cancelled")
 	}
@@ -31,17 +39,30 @@ func acquireLock(ctx context.Context, root string, exclusive bool, timeout time.
 	defer func() { _ = unix.Close(rootFD) }()
 	stickerFD, err := unix.Openat(rootFD, ".sticker", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if errors.Is(err, unix.ENOENT) {
+		if !create {
+			return nil, nil
+		}
 		if mkdirErr := unix.Mkdirat(rootFD, ".sticker", 0o700); mkdirErr != nil && !errors.Is(mkdirErr, unix.EEXIST) {
 			return nil, wrapError("io", "write_failed", "Choose a writable library directory.", mkdirErr)
 		}
 		stickerFD, err = unix.Openat(rootFD, ".sticker", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	}
 	if err != nil {
+		if !create {
+			return nil, wrapError("io", "read_failed", "Check the library lock.", err)
+		}
 		return nil, wrapError("validation", "unsafe_path", "Remove links from the library path.", err)
 	}
 	defer func() { _ = unix.Close(stickerFD) }()
-	fileFD, err := unix.Openat(stickerFD, "write.lock", unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC, 0o600)
+	fileFlags := unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	if create {
+		fileFlags = unix.O_CREAT | unix.O_RDWR | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	}
+	fileFD, err := unix.Openat(stickerFD, "write.lock", fileFlags, 0o600)
 	if errors.Is(err, unix.ENOENT) {
+		if !create {
+			return nil, nil
+		}
 		// Some older Darwin filesystems do not permit O_CREAT through an
 		// openat directory descriptor; the anchored directory is still held
 		// while this fallback creates the lock file by its checked path.
@@ -57,6 +78,9 @@ func acquireLock(ctx context.Context, root string, exclusive bool, timeout time.
 		err = pathErr
 	}
 	if err != nil {
+		if !create {
+			return nil, wrapError("io", "read_failed", "Check the library lock.", err)
+		}
 		return nil, wrapError("io", "write_failed", "Choose a writable library directory.", err)
 	}
 	file := os.NewFile(uintptr(fileFD), filepath.Join(root, ".sticker", "write.lock"))
@@ -104,7 +128,7 @@ func acquireReadLockIfPresent(ctx context.Context, root string, timeout time.Dur
 	} else if err != nil {
 		return nil, wrapError("io", "read_failed", "Check the library lock.", err)
 	}
-	return acquireLock(ctx, root, false, timeout)
+	return acquireReadLock(ctx, root, timeout)
 }
 
 func (l *fileLock) Close() error {
